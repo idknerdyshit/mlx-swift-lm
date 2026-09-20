@@ -1938,7 +1938,11 @@ private final class Gemma4VisionModel: Module {
 }
 
 private final class Gemma4MultimodalEmbedder: Module, UnaryLayer {
-    @ModuleInfo(key: "embedding_projection") var embeddingProjection: Linear
+    // The published 4-bit Gemma 4 checkpoints quantize this projection and
+    // therefore load it as `QuantizedLinear`. Keep the slot type-erased so it
+    // can hold either the initialized full-precision layer or its quantized
+    // replacement during checkpoint loading.
+    @ModuleInfo(key: "embedding_projection") var embeddingProjection: Module
     @ModuleInfo(key: "embedding_pre_projection_norm") var embeddingPreProjectionNorm:
         Gemma4RMSNormNoScale
 
@@ -1949,7 +1953,15 @@ private final class Gemma4MultimodalEmbedder: Module, UnaryLayer {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        embeddingProjection(embeddingPreProjectionNorm(x))
+        let normalized = embeddingPreProjectionNorm(x)
+        switch embeddingProjection {
+        case let linear as Linear:
+            return linear(normalized)
+        case let quantized as QuantizedLinear:
+            return quantized(normalized)
+        default:
+            fatalError("Gemma 4 embedding projection must be Linear or QuantizedLinear")
+        }
     }
 }
 
