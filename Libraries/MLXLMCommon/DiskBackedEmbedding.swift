@@ -124,19 +124,23 @@ private func readSafetensorEntries(url: URL) throws -> [String: SafetensorEntry]
         guard shape.count == 2, shape[0] > 0, shape[1] > 0 else {
             throw DiskBackedEmbeddingError.invalidShape(name, shape)
         }
+        let dtype = try safetensorDType(dtypeName)
         let begin = offsets[0].intValue
         let end = offsets[1].intValue
         guard begin >= 0, end >= begin, headerEnd + end <= data.count else {
             throw DiskBackedEmbeddingError.malformedSafetensors(url)
         }
         let byteCount = end - begin
-        guard byteCount > 0, byteCount % shape[0] == 0 else {
+        let (elementCount, elementOverflow) = shape[0].multipliedReportingOverflow(by: shape[1])
+        let (expectedByteCount, byteOverflow) = elementCount.multipliedReportingOverflow(
+            by: dtype.size)
+        guard !elementOverflow, !byteOverflow, byteCount == expectedByteCount else {
             throw DiskBackedEmbeddingError.invalidShape(name, shape)
         }
         result[name] = try SafetensorEntry(
             name: name,
             dtypeName: dtypeName,
-            dtype: safetensorDType(dtypeName),
+            dtype: dtype,
             shape: shape,
             data: data,
             dataStart: headerEnd + begin,
@@ -162,7 +166,6 @@ package final class DiskBackedEmbedding: Embedding {
     private let storedBiases: SafetensorEntry?
     private let bits: Int?
     private let groupSize: Int?
-    private let quantizationMode: QuantizationMode
 
     package init(
         modelDirectory: URL,
@@ -197,7 +200,6 @@ package final class DiskBackedEmbedding: Embedding {
 
         let inferredBits: Int?
         let inferredGroupSize: Int?
-        let mode: QuantizationMode
         if let scales {
             guard weight.dtypeName == "U32", scales.rowCount == vocabularySize,
                 dimensions % scales.rowWidth == 0,
@@ -210,19 +212,19 @@ package final class DiskBackedEmbedding: Embedding {
                 throw DiskBackedEmbeddingError.incompatibleQuantization(
                     "Gemma PLE bias and scale shapes differ.")
             }
+            guard let biases,
+                ["BF16", "F16", "F32"].contains(scales.dtypeName),
+                biases.dtypeName == scales.dtypeName
+            else {
+                throw DiskBackedEmbeddingError.incompatibleQuantization(
+                    "Only affine Gemma PLE quantization with matching floating-point scales and biases is supported."
+                )
+            }
             inferredBits = weight.rowWidth * 32 / dimensions
             inferredGroupSize = dimensions / scales.rowWidth
-            if biases != nil {
-                mode = .affine
-            } else if inferredBits == 4, inferredGroupSize == 32 {
-                mode = .mxfp4
-            } else if inferredBits == 8, inferredGroupSize == 32 {
-                mode = .mxfp8
-            } else if inferredBits == 4, inferredGroupSize == 16 {
-                mode = .nvfp4
-            } else {
+            guard inferredBits == 4 || inferredBits == 8 else {
                 throw DiskBackedEmbeddingError.incompatibleQuantization(
-                    "Unsupported Gemma PLE quantization: bits=\(inferredBits!), groupSize=\(inferredGroupSize!)."
+                    "Unsupported affine Gemma PLE bit width: \(inferredBits!)."
                 )
             }
         } else {
@@ -234,7 +236,6 @@ package final class DiskBackedEmbedding: Embedding {
             }
             inferredBits = nil
             inferredGroupSize = nil
-            mode = .affine
         }
 
         self.storageTensorNames = Set(
@@ -248,7 +249,6 @@ package final class DiskBackedEmbedding: Embedding {
         self.storedBiases = biases
         self.bits = inferredBits
         self.groupSize = inferredGroupSize
-        self.quantizationMode = mode
         super.init(weight: MLXArray.zeros([1, 1]))
     }
 
@@ -259,6 +259,9 @@ package final class DiskBackedEmbedding: Embedding {
     override package func callAsFunction(_ x: MLXArray) -> MLXArray {
         let originalShape = x.shape
         let tokens = x.reshaped(-1).asArray(Int.self)
+        if tokens.isEmpty {
+            return MLXArray.zeros(originalShape + [dimensions])
+        }
 
         var uniqueTokens = [Int]()
         var tokenToIndex = [Int: Int]()
@@ -283,7 +286,7 @@ package final class DiskBackedEmbedding: Embedding {
                 let biases = try storedBiases?.rows(uniqueTokens)
                 values = dequantized(
                     values, scales: scales, biases: biases,
-                    groupSize: groupSize, bits: bits, mode: quantizationMode)
+                    groupSize: groupSize, bits: bits, mode: .affine)
             }
             if uniqueTokens.count != tokens.count {
                 values = values[MLXArray(inverse)]
