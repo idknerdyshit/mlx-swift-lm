@@ -2208,8 +2208,14 @@ extension Gemma4: DiskBackedWeightsProviding {
             ]),
             verify: [.noUnusedKeys])
 
+        let unusedAudioTensorNames = embedding.checkpointTensorNames.filter {
+            $0.contains("audio_tower") || $0.contains("embed_audio")
+        }
         return DiskBackedWeightPlan(
-            excludedTensorNames: embedding.storageTensorNames,
+            // Gemma4 currently supports text + vision only. Exclude the audio tower
+            // before the native loader evaluates it, rather than materializing a large
+            // unused tower and relying on sanitize(weights:) to discard it afterward.
+            excludedTensorNames: embedding.storageTensorNames.union(unusedAudioTensorNames),
             placeholderWeights: [
                 embedding.checkpointWeightName: MLXArray.zeros([1, 1])
             ])

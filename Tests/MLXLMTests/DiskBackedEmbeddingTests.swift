@@ -46,6 +46,9 @@ final class DiskBackedEmbeddingTests: XCTestCase {
         XCTAssertEqual(embedding.shape.0, 6)
         XCTAssertEqual(embedding.shape.1, 8)
         XCTAssertEqual(embedding.weight.shape, [1, 1])
+        XCTAssertTrue(
+            embedding.checkpointTensorNames.contains(
+                "audio_tower.encoder.layers.0.conv.weight"))
     }
 
     func testAffineQuantizedEmbeddingMatchesCheckpointDequantization() throws {

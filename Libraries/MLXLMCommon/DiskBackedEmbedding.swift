@@ -92,10 +92,15 @@ private func safetensorDType(_ name: String) throws -> DType {
     }
 }
 
+private struct SafetensorScan {
+    let entries: [String: SafetensorEntry]
+    let tensorNames: Set<String>
+}
+
 private func readSafetensorEntries(
     url: URL,
     matchingSuffixes: [String]
-) throws -> [String: SafetensorEntry] {
+) throws -> SafetensorScan {
     let data = try Data(contentsOf: url, options: .alwaysMapped)
     guard data.count >= 8 else {
         throw DiskBackedEmbeddingError.malformedSafetensors(url)
@@ -114,6 +119,7 @@ private func readSafetensorEntries(
         throw DiskBackedEmbeddingError.malformedSafetensors(url)
     }
 
+    let tensorNames = Set(object.keys.filter { $0 != "__metadata__" })
     var result = [String: SafetensorEntry]()
     for (name, rawEntry) in object where name != "__metadata__" {
         // A shard may also contain arbitrary vision/audio/text tensors. Only the PLE
@@ -153,7 +159,7 @@ private func readSafetensorEntries(
             dataStart: headerEnd + begin,
             byteCount: byteCount)
     }
-    return result
+    return SafetensorScan(entries: result, tensorNames: tensorNames)
 }
 
 /// An embedding whose checkpoint table stays memory-mapped and whose requested rows alone are
@@ -165,6 +171,7 @@ private func readSafetensorEntries(
 package final class DiskBackedEmbedding: Embedding {
     package let storageTensorNames: Set<String>
     package let checkpointWeightName: String
+    package let checkpointTensorNames: Set<String>
     package let dimensions: Int
     package let vocabularySize: Int
 
@@ -190,10 +197,14 @@ package final class DiskBackedEmbedding: Embedding {
             "\(baseSuffix).biases",
         ]
         var entries = [String: SafetensorEntry]()
+        var checkpointTensorNames = Set<String>()
         for url in try safetensorWeightURLs(in: modelDirectory) {
+            let scan = try readSafetensorEntries(
+                url: url, matchingSuffixes: matchingSuffixes)
             entries.merge(
-                try readSafetensorEntries(url: url, matchingSuffixes: matchingSuffixes)
+                scan.entries
             ) { _, new in new }
+            checkpointTensorNames.formUnion(scan.tensorNames)
         }
 
         let candidates = entries.keys.filter { $0.hasSuffix(weightSuffix) }.sorted()
@@ -260,6 +271,7 @@ package final class DiskBackedEmbedding: Embedding {
             [weightName, scales == nil ? nil : scalesName, biases == nil ? nil : biasesName]
                 .compactMap { $0 })
         self.checkpointWeightName = weightName
+        self.checkpointTensorNames = checkpointTensorNames
         self.dimensions = dimensions
         self.vocabularySize = vocabularySize
         self.storedWeight = weight
