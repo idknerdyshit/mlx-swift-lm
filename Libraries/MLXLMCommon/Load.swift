@@ -151,7 +151,9 @@ private final class ConcurrentLoadState: @unchecked Sendable {
 /// range's I/O inside the work item), and the results are merged in file order. A file whose
 /// header cannot be parsed is loaded whole by one work item, which is exactly the serial
 /// loader's behavior for that file.
-func loadWeightArrays(urls: [URL]) throws -> (
+func loadWeightArrays(
+    urls: [URL], excludingTensorNames: Set<String> = []
+) throws -> (
     weights: [String: MLXArray], metadata: [String: String]
 ) {
     struct WorkItem {
@@ -180,8 +182,12 @@ func loadWeightArrays(urls: [URL]) throws -> (
                 for range in contiguousLoadGroups(
                     byteCounts: spans.map(\.byteCount), groupCount: groupCount)
                 {
-                    items.append(
-                        WorkItem(file: file, url: url, names: spans[range].map(\.name)))
+                    let names = spans[range].map(\.name).filter {
+                        !excludingTensorNames.contains($0)
+                    }
+                    if !names.isEmpty {
+                        items.append(WorkItem(file: file, url: url, names: names))
+                    }
                 }
             } else {
                 items.append(WorkItem(file: file, url: url, names: nil))
@@ -205,7 +211,7 @@ func loadWeightArrays(urls: [URL]) throws -> (
                     if let array = all[name] { selected[name] = array }
                 }
             } else {
-                selected = all
+                selected = all.filter { !excludingTensorNames.contains($0.key) }
             }
 
             // force this range's I/O here, on this stream, in file-offset order
@@ -379,7 +385,14 @@ public func loadWeights(
         in: modelDirectory,
         selection: weightFileSelection,
         additionalFiles: additionalFiles ?? [])
-    (weights, metadata) = try loadWeightArrays(urls: weightURLs)
+    let diskBackedPlan = try (model as? any DiskBackedWeightsProviding)?
+        .prepareDiskBackedWeights(in: modelDirectory)
+    (weights, metadata) = try loadWeightArrays(
+        urls: weightURLs,
+        excludingTensorNames: diskBackedPlan?.excludedTensorNames ?? [])
+    if let diskBackedPlan {
+        weights.merge(diskBackedPlan.placeholderWeights) { _, replacement in replacement }
+    }
 
     // per-model cleanup (models can inspect metadata to customize behavior)
     weights = model.sanitize(weights: weights, metadata: metadata)

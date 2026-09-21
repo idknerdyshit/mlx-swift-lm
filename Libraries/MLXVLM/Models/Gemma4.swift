@@ -2187,6 +2187,38 @@ public final class Gemma4: Module, VLMModel, KVCacheDimensionProvider {
     }
 }
 
+extension Gemma4: DiskBackedWeightsProviding {
+    package func prepareDiskBackedWeights(in modelDirectory: URL) throws
+        -> DiskBackedWeightPlan?
+    {
+        #if os(iOS) && !targetEnvironment(simulator)
+        let dimensions =
+            config.textConfiguration.hiddenLayers
+            * config.textConfiguration.hiddenSizePerLayerInput
+        guard dimensions > 0 else { return nil }
+
+        let embedding = try DiskBackedEmbedding(
+            modelDirectory: modelDirectory,
+            weightSuffix: "embed_tokens_per_layer.weight",
+            dimensions: dimensions,
+            vocabularySize: config.textConfiguration.vocabularySizePerLayerInput)
+        try update(
+            modules: ModuleChildren.unflattened([
+                ("language_model.model.embed_tokens_per_layer", embedding)
+            ]),
+            verify: [.noUnusedKeys])
+
+        return DiskBackedWeightPlan(
+            excludedTensorNames: embedding.storageTensorNames,
+            placeholderWeights: [
+                embedding.checkpointWeightName: MLXArray.zeros([1, 1])
+            ])
+        #else
+        return nil
+        #endif
+    }
+}
+
 // MARK: - Gemma 4 Unified
 
 public struct Gemma4UnifiedAudioConfiguration: Codable, Sendable {
