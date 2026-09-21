@@ -92,7 +92,10 @@ private func safetensorDType(_ name: String) throws -> DType {
     }
 }
 
-private func readSafetensorEntries(url: URL) throws -> [String: SafetensorEntry] {
+private func readSafetensorEntries(
+    url: URL,
+    matchingSuffixes: [String]
+) throws -> [String: SafetensorEntry] {
     let data = try Data(contentsOf: url, options: .alwaysMapped)
     guard data.count >= 8 else {
         throw DiskBackedEmbeddingError.malformedSafetensors(url)
@@ -113,6 +116,10 @@ private func readSafetensorEntries(url: URL) throws -> [String: SafetensorEntry]
 
     var result = [String: SafetensorEntry]()
     for (name, rawEntry) in object where name != "__metadata__" {
+        // A shard may also contain arbitrary vision/audio/text tensors. Only the PLE
+        // weight and its quantization metadata use this reader's two-dimensional row
+        // layout; the normal MLX loader remains responsible for everything else.
+        guard matchingSuffixes.contains(where: name.hasSuffix) else { continue }
         guard let entry = rawEntry as? [String: Any],
             let dtypeName = entry["dtype"] as? String,
             let shapeNumbers = entry["shape"] as? [NSNumber],
@@ -173,9 +180,20 @@ package final class DiskBackedEmbedding: Embedding {
         dimensions: Int,
         vocabularySize: Int
     ) throws {
+        let baseSuffix =
+            weightSuffix.hasSuffix(".weight")
+            ? String(weightSuffix.dropLast(".weight".count))
+            : weightSuffix
+        let matchingSuffixes = [
+            weightSuffix,
+            "\(baseSuffix).scales",
+            "\(baseSuffix).biases",
+        ]
         var entries = [String: SafetensorEntry]()
         for url in try safetensorWeightURLs(in: modelDirectory) {
-            entries.merge(try readSafetensorEntries(url: url)) { _, new in new }
+            entries.merge(
+                try readSafetensorEntries(url: url, matchingSuffixes: matchingSuffixes)
+            ) { _, new in new }
         }
 
         let candidates = entries.keys.filter { $0.hasSuffix(weightSuffix) }.sorted()

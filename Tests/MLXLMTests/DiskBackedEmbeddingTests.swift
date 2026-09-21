@@ -17,7 +17,14 @@ final class DiskBackedEmbeddingTests: XCTestCase {
         let directory = try temporaryDirectory()
         let values = MLXArray(Array(0 ..< 48).map(Float.init), [6, 8]).asType(.float16)
         try save(
-            arrays: ["language_model.model.embed_tokens_per_layer.weight": values],
+            arrays: [
+                "language_model.model.embed_tokens_per_layer.weight": values,
+                // Gemma 4 checkpoints colocate non-PLE tensors in these shards. The
+                // disk reader must leave unsupported audio shapes/dtypes to the normal
+                // model sanitizer instead of treating them as embedding rows.
+                "audio_tower.encoder.layers.0.conv.weight": MLXArray.zeros(
+                    [2, 2, 2], dtype: .uint8),
+            ],
             url: directory.appendingPathComponent("model.safetensors"))
 
         let embedding = try DiskBackedEmbedding(
